@@ -45,9 +45,11 @@ math), with SiLU/ReLU2/SwiGLU-OAI activations; plus `moe.ep_moe` (expert
 parallel).
 
 **the rest** — `norm.mhc` (fused RMSNorm + hyper-connection residual),
-`quantization.{nvfp4,mxfp8}` (row quantizers), and `comm.pcie` (IPC-backed PCIe
-collectives). `b12x` owns planning, scratch layout, and policy, so
-serving stacks only supply metadata and capacity limits.
+`quantization.{nvfp4,mxfp8}` (row quantizers), `comm.roce` (RoCEnante:
+one-shot RDMA all-reduce/all-gather for multi-node DGX Spark TP, see
+`docs/rocenante.md`), and `comm.pcie` (IPC-backed PCIe collectives).
+`b12x` owns planning, scratch layout, and policy, so serving stacks only supply
+metadata and capacity limits.
 
 ## Using it
 

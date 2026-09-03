@@ -38,6 +38,9 @@ b12x_fp6 = "b12x.integration.vllm.plugin:register_b12x_fp6"
 where = ["."]
 include = ["b12x*"]
 
+[tool.setuptools.package-data]
+"b12x.comm.roce" = ["*.c"]
+
 [tool.ruff.lint]
 select = ["E", "F", "B", "SIM"]
 ignore = [
