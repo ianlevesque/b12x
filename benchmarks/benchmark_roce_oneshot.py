@@ -306,26 +306,7 @@ def main() -> None:
         threads=args.runtime_threads,
         blocks=args.runtime_blocks,
     )
-    from b12x.comm.roce import _preparation
-    from b12x.preparation import PreparationSession, PreparedCall
-
-    query = roce.query_from_runtime(
-        runtime,
-        surface="AllReduce.all_reduce",
-        call={"dtypes": (args.dtype,)},
-        topology="roce_rdma",
-        peer_hosts=tuple(f"rank-{r}" for r in range(world)),
-    )
-    plan = roce.plan(query, runtime=runtime)
-    seed = torch.zeros(16 // dtype.itemsize, dtype=dtype, device=device)
-
-    def prepare(state):
-        reduce_call = _preparation.prepared_call(state, inp=seed)
-        gather_call = _preparation.prepared_gather_call(state, inp=seed)
-        return PreparedCall(run=lambda: (reduce_call.run(), gather_call.run()))
-
-    session = PreparationSession(device=device, autotune=False, compile_workers=2)
-    session.prepare((plan.request(name="roce", prepare_call=prepare),))
+    runtime.prepare((dtype,))
     sizes = [int(s) for s in args.sizes.split(",") if int(s) <= args.max_size]
 
     def progress(msg: str) -> None:
@@ -348,7 +329,7 @@ def main() -> None:
         out = torch.empty_like(inp)
         expected = inp.clone()
         dist.all_reduce(expected)
-        runtime.all_reduce(inp, out=out, plan=plan)
+        runtime.all_reduce(inp, out=out)
         torch.cuda.synchronize()
         # Oracle before timing: a mismatch stops the run.
         torch.testing.assert_close(out, expected, rtol=rtol, atol=atol)
@@ -357,7 +338,7 @@ def main() -> None:
         nccl_in = inp.clone()
         progress(f"size {nbytes}: timing (interleaved)")
         roce_graph = _capture_graph(
-            lambda: runtime.all_reduce(inp, out=out, plan=plan), args.warmups, args.graph_ops
+            lambda: runtime.all_reduce(inp, out=out), args.warmups, args.graph_ops
         )
         nccl_graph_in = torch.zeros_like(inp)
         nccl_graph = _capture_graph(
@@ -370,7 +351,7 @@ def main() -> None:
             # The zero input remains zero across graph replays, avoiding
             # overflow from graph_ops repeated in-place reductions.
             "nccl_graph": (nccl_graph.replay, None, args.graph_ops),
-            "roce_eager": (lambda: runtime.all_reduce(inp, out=out, plan=plan), None, 1),
+            "roce_eager": (lambda: runtime.all_reduce(inp, out=out), None, 1),
             "roce_graph": (roce_graph.replay, None, args.graph_ops),
         }
         raw, order = _time_arms(arms, args.warmups, args.samples, args.blocks)
@@ -419,7 +400,7 @@ def main() -> None:
         dist.all_gather(parts, shard)
         expected = torch.cat(parts, dim=-1)
         got = torch.empty_like(expected)
-        runtime.all_gather(shard, dim=-1, out=got, plan=plan)
+        runtime.all_gather(shard, dim=-1, out=got)
         torch.cuda.synchronize()
         if not torch.equal(got, expected):
             raise RuntimeError(f"RoCE all-gather {shape} is not bit-exact against NCCL")
@@ -442,7 +423,7 @@ def main() -> None:
 
         progress(f"all-gather {shape}: timing (interleaved)")
         roce_graph = _capture_graph(
-            lambda: runtime.all_gather(shard, dim=-1, out=got, plan=plan),
+            lambda: runtime.all_gather(shard, dim=-1, out=got),
             args.warmups,
             args.graph_ops,
         )
@@ -450,7 +431,7 @@ def main() -> None:
         arms = {
             "nccl": (nccl_gather, None, 1),
             "nccl_graph": (nccl_graph.replay, None, args.graph_ops),
-            "roce_eager": (lambda: runtime.all_gather(shard, dim=-1, out=got, plan=plan), None, 1),
+            "roce_eager": (lambda: runtime.all_gather(shard, dim=-1, out=got), None, 1),
             "roce_graph": (roce_graph.replay, None, args.graph_ops),
         }
         raw, order = _time_arms(arms, args.warmups, args.samples, args.blocks)
@@ -537,7 +518,6 @@ def main() -> None:
             dump_compact_json(doc, Path(args.output))
             print(f"wrote {args.output}")
     dist.barrier()
-    session.close()
     runtime.close()
     dist.destroy_process_group()
 

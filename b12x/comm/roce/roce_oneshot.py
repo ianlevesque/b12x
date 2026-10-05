@@ -31,7 +31,7 @@ import torch.distributed as dist
 from torch.distributed import ProcessGroup
 
 from . import _allgather_cute
-from ._oneshot_cute import PACK_BYTES, get_launcher
+from ._oneshot_cute import PACK_BYTES, get_launcher, is_launcher_prepared
 from ._proxy import Layout, Proxy, load as _load_proxy_library
 
 logger = logging.getLogger(__name__)
@@ -540,7 +540,7 @@ class RoceOneshotAllReduce:
                 raise ValueError(
                     "out must be a contiguous tensor on the input's device matching the input"
                 )
-            self._launcher_key(inp.dtype)
+            key = self._launcher_key(inp.dtype)
             nbytes = inp.numel() * inp.element_size()
             context = (
                 torch.cuda.stream(stream) if stream is not None else _nullcontext()
