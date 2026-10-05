@@ -5306,6 +5306,7 @@ class MoEMicroKernelBackend:
                     if cutlass.const_expr(self.is_gated):
                         up_red = cute.arch.warp_reduction_sum(partial_up) * alpha_fc1
                     if lane == Int32(0):
+<<<<<<< HEAD
                         activated = Float32(0.0)
                         if route_active > Int32(0):
                             if cutlass.const_expr(self.is_gated):
@@ -5331,6 +5332,33 @@ class MoEMicroKernelBackend:
                             else:
                                 relu_val = fmax_f32(gate_red, Float32(0.0))
                                 activated = relu_val * relu_val
+=======
+                        if cutlass.const_expr(self.is_gated):
+                            if cutlass.const_expr(self.has_swiglu_limit):
+                                limit = Float32(self.swiglu_limit)
+                                neg_limit = Float32(-self.swiglu_limit)
+                                if gate_red > limit:
+                                    gate_red = limit
+                                if up_red > limit:
+                                    up_red = limit
+                                if up_red < neg_limit:
+                                    up_red = neg_limit
+                            sigmoid_arg = gate_red
+                            up_term = up_red
+                            if cutlass.const_expr(self.is_swigluoai):
+                                sigmoid_arg = Float32(self.swiglu_alpha) * gate_red
+                                up_term = up_red + Float32(self.swiglu_beta)
+                            sigmoid = Float32(1.0) / (
+                                Float32(1.0) + cute.math.exp(-sigmoid_arg, fastmath=False)
+                            )
+                            if cutlass.const_expr(self.is_situ):
+                                activated = self._trellis_gated_value(gate_red, up_red)
+                            else:
+                                activated = sigmoid * gate_red * up_term
+                        else:
+                            relu_val = fmax_f32(gate_red, Float32(0.0))
+                            activated = relu_val * relu_val
+>>>>>>> 8b747e74 (fix(moe): apply SiTU in native W4A16 direct micro execution)
                         smem_int[i_local] = Float32(BFloat16(activated))
 
                 # Look-ahead: quantize next task into other buffer (k_segments==2 only)
