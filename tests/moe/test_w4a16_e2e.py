@@ -1116,6 +1116,11 @@ def test_w4a16_e8m0_native_micro_ignores_inactive_routes_during_graph_replay(
     m: int,
     route_ids_dtype: torch.dtype,
     monkeypatch: pytest.MonkeyPatch,
+    *,
+    experts: int = 4,
+    hidden_size: int = 128,
+    intermediate_size: int = 192,
+    topk: int = 2,
 ) -> None:
     """Native small-M execution must not address weights for inactive routes."""
     import b12x.moe._shared.kernels.w4a16.kernel as w4a16_kernel
@@ -1134,8 +1139,7 @@ def test_w4a16_e8m0_native_micro_ignores_inactive_routes_during_graph_replay(
         "_w4a16_small_m_direct_launch_flat",
         spy_direct_launch,
     )
-    experts, hidden_size, intermediate_size = 4, 128, 192
-    topk, activation = 2, "situ"
+    activation = "situ"
     rows = 2 * intermediate_size
     torch.manual_seed(20260817 + m)
     w13 = torch.randint(
@@ -1180,9 +1184,9 @@ def test_w4a16_e8m0_native_micro_ignores_inactive_routes_during_graph_replay(
         device="cuda",
     )
     inputs = torch.randn(m, hidden_size, dtype=torch.bfloat16, device="cuda")
-    topk_ids = torch.randint(
-        0, experts, (m, topk), dtype=route_ids_dtype, device="cuda"
-    )
+    topk_ids = torch.stack(
+        [torch.randperm(experts, device="cuda")[:topk] for _ in range(m)]
+    ).to(route_ids_dtype)
     topk_weights = torch.rand(m, topk, dtype=torch.float32, device="cuda")
 
     def launch() -> torch.Tensor:
@@ -1208,6 +1212,14 @@ def test_w4a16_e8m0_native_micro_ignores_inactive_routes_during_graph_replay(
     assert direct_launches == 1
     assert bool(torch.isfinite(valid_eager).all().item())
     assert bool((valid_eager.abs().sum(dim=1) > 0).all().item())
+    # The all-inactive M1 result cannot detect an incorrect activation.
+    # Check valid routes first, before the graph/inactive-route canaries.
+    valid_expected = moe_reference_w4a16_fp4_e8m0_k32(
+        inputs, w13, w13_scale, global_scale, w2, w2_scale, global_scale,
+        topk_ids, topk_weights, experts, hidden_size, intermediate_size,
+        activation=activation, w13_layout="w31",
+    )
+    _assert_matches_oracle(valid_eager, valid_expected, activation=activation)
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph):
         captured = launch()
@@ -1216,7 +1228,7 @@ def test_w4a16_e8m0_native_micro_ignores_inactive_routes_during_graph_replay(
     inactive_ids = topk_ids.clone()
     invalid_upper = 1 << 32 if route_ids_dtype == torch.int64 else experts
     inactive_ids[-1] = torch.tensor(
-        [-1, invalid_upper], dtype=route_ids_dtype, device="cuda"
+        [-1, invalid_upper] * (topk // 2), dtype=route_ids_dtype, device="cuda"
     )
     if m > 1:
         inactive_ids[0, 0] = -1
@@ -1256,6 +1268,24 @@ def test_w4a16_e8m0_native_micro_ignores_inactive_routes_during_graph_replay(
     torch.testing.assert_close(captured, eager, rtol=0, atol=0)
     torch.testing.assert_close(topk_ids, inactive_ids, rtol=0, atol=0)
     torch.testing.assert_close(topk_weights, original_weights, rtol=0, atol=0)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+@pytest.mark.parametrize(
+    ("m", "route_ids_dtype"),
+    [(1, torch.int32), (2, torch.int32), (4, torch.int32), (8, torch.int32),
+     (1, torch.int64)],
+)
+def test_w4a16_e8m0_native_situ_kimi_tp16(
+    m: int,
+    route_ids_dtype: torch.dtype,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """K3's real projection width exposes SiLU substituted for SiTU."""
+    test_w4a16_e8m0_native_micro_ignores_inactive_routes_during_graph_replay(
+        m, route_ids_dtype, monkeypatch,
+        experts=32, hidden_size=3584, intermediate_size=192, topk=16,
+    )
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")

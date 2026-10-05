@@ -5319,7 +5319,10 @@ class MoEMicroKernelBackend:
                             sigmoid = Float32(1.0) / (
                                 Float32(1.0) + cute.math.exp(-sigmoid_arg, fastmath=False)
                             )
-                            activated = sigmoid * gate_red * up_term
+                            if cutlass.const_expr(self.is_situ):
+                                activated = self._trellis_gated_value(gate_red, up_red)
+                            else:
+                                activated = sigmoid * gate_red * up_term
                         else:
                             relu_val = fmax_f32(gate_red, Float32(0.0))
                             activated = relu_val * relu_val
