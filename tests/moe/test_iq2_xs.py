@@ -193,7 +193,7 @@ def weight_plan(
     )
 
 
-@pytest.mark.parametrize("activation", ["silu", "relu2"])
+@pytest.mark.parametrize("activation", ["silu", "relu2", "situ"])
 @pytest.mark.parametrize("i", [256, 512])
 @pytest.mark.parametrize("codec", ["iq2_xs", "iq2_xxs"])
 def test_public_weight_plan(activation, i, codec):

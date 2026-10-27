@@ -118,8 +118,8 @@ def prepare_iq2_xs_moe_weights(
 ) -> PreparedW4A16MoeWeights:
     """Prepare compact IQ2_XS storage and device tables before execution."""
     spec = block_codec(codec)
-    if activation not in {"silu", "relu2"}:
-        raise ValueError("IQ2_XS supports SiLU and ReLU²")
+    if activation not in {"silu", "situ", "relu2"}:
+        raise ValueError("IQ2_XS supports SiLU, SiTU and ReLU²")
     if w13_layout not in {"w13", "w31"}:
         raise ValueError("IQ2_XS requires w13 or w31 projection order")
     if (
@@ -130,7 +130,7 @@ def prepare_iq2_xs_moe_weights(
         raise ValueError("IQ2_XS requires positive geometry and H/I divisible by 256")
     if not w13.is_cuda or w2.device != w13.device:
         raise ValueError("IQ2_XS preparation requires tensors on one CUDA device")
-    gated = activation == "silu"
+    gated = activation in {"silu", "situ"}
     expected13 = (
         num_experts,
         intermediate_size * (2 if gated else 1),
