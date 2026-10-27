@@ -13,6 +13,11 @@ import struct
 
 import torch
 
+# Kimi K3 SiTU contract (beta-scaled tanh gate); kept local so this oracle
+# stays independent of production activation metadata.
+_SITU_BETA = 4.0
+_SITU_LINEAR_BETA = 25.0
+
 _GRID_WORDS = (
     0x0808080808080808,
     0x080808080808082B,
@@ -579,8 +584,10 @@ def moe_reference_iq2_xs(
     swiglu_limit=None,
 ):
     """FP32 MoE oracle with BF16 decoded weights and materialized boundaries."""
-    if activation not in {"silu", "relu2"} or w13_layout not in {"w13", "w31"}:
+    if activation not in {"silu", "situ", "relu2"} or w13_layout not in {"w13", "w31"}:
         raise ValueError("unsupported IQ2_XS oracle activation or projection order")
+    if activation == "situ" and swiglu_limit is not None:
+        raise ValueError("swiglu_limit is not part of the situ activation contract")
     output = torch.zeros_like(x, dtype=torch.float32)
     selected = range(w13.shape[0]) if expert_ids is None else expert_ids
     positions = {expert: local for local, expert in enumerate(selected)}
@@ -592,15 +599,26 @@ def moe_reference_iq2_xs(
         first = dequantize_blocks(w13[local]).bfloat16().to(x.device).float()
         second = dequantize_blocks(w2[local]).bfloat16().to(x.device).float()
         projected = (x[row].float() @ first.T).bfloat16().float()
-        if activation == "silu":
+        if activation in ("silu", "situ"):
             left, right = projected.chunk(2, -1)
             gate, up = (left, right) if w13_layout == "w31" else (right, left)
-            if swiglu_limit is not None:
-                gate, up = (
-                    gate.clamp(max=swiglu_limit),
-                    up.clamp(-swiglu_limit, swiglu_limit),
+            if activation == "situ":
+                situ_gate = (
+                    _SITU_BETA
+                    * torch.tanh(gate / _SITU_BETA)
+                    * torch.sigmoid(gate)
                 )
-            intermediate = (torch.nn.functional.silu(gate) * up).bfloat16().float()
+                situ_up = _SITU_LINEAR_BETA * torch.tanh(
+                    up / _SITU_LINEAR_BETA
+                )
+                intermediate = (situ_gate * situ_up).bfloat16().float()
+            else:
+                if swiglu_limit is not None:
+                    gate, up = (
+                        gate.clamp(max=swiglu_limit),
+                        up.clamp(-swiglu_limit, swiglu_limit),
+                    )
+                intermediate = (torch.nn.functional.silu(gate) * up).bfloat16().float()
         else:
             intermediate = projected.relu().square().bfloat16().float()
         contribution = (

@@ -326,8 +326,8 @@ def validate_moe_decode_config(
     if query.source_format in BLOCK_CODECS:
         if query.quant_mode != "w4a16" or query.io_dtype != "bfloat16":
             raise ValueError("IQ2_XS requires BF16 W4A16 execution")
-        if query.activation not in {"silu", "relu2"} or query.hidden_size % max(128, block_codec(query.source_format).block_weights) or query.intermediate_size % max(128, block_codec(query.source_format).block_weights):
-            raise ValueError("IQ2_XS requires aligned SiLU or ReLU² geometry")
+        if query.activation not in {"silu", "situ", "relu2"} or query.hidden_size % max(128, block_codec(query.source_format).block_weights) or query.intermediate_size % max(128, block_codec(query.source_format).block_weights):
+            raise ValueError("IQ2_XS requires aligned SiLU, SiTU or ReLU² geometry")
         if config.w4a16_route_mode == "direct":
             from ._impl import _w4a16_direct_routing_supported
             if not _w4a16_direct_routing_supported(query):

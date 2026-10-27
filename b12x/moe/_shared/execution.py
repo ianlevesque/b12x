@@ -975,8 +975,8 @@ def plan_moe_weight_preparation(
             continue
         if spec.quant_mode == "w4a16":
             if source_format in BLOCK_CODECS:
-                if spec.io_dtype != "bfloat16" or spec.activation not in {"silu", "relu2"}:
-                    raise ValueError("IQ2_XS requires BF16 A16 with SiLU or ReLU²")
+                if spec.io_dtype != "bfloat16" or spec.activation not in {"silu", "situ", "relu2"}:
+                    raise ValueError("IQ2_XS requires BF16 A16 with SiLU, SiTU or ReLU²")
                 if hidden_size % max(128, block_codec(source_format).block_weights) or intermediate_size % max(128, block_codec(source_format).block_weights):
                     raise ValueError("IQ2_XS requires H/I divisible by 256")
                 if requested_w4a16_layout not in {None, PreparedWeightLayout(source_format + "_compact")}:

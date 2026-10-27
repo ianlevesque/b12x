@@ -22,6 +22,8 @@ from .test_iq2_xs import blocks
         ("silu", True, "packed", 65, (9, 17, 33, 65)),
         ("relu2", True, "packed", 65, (9, 17, 33, 65)),
         ("silu", True, "packed", 16, (1, 3, 8, 16)),
+        ("situ", True, "packed", 16, (1, 3, 8, 16)),
+        ("situ", True, "packed", 65, (9, 17, 33, 65)),
         ("silu", True, "direct", 8, (8,)),
         ("relu2", False, "packed", 16, (1, 3, 8, 16)),
         ("relu2", True, "packed", 16, (1, 3, 8, 16)),
@@ -38,7 +40,7 @@ def test_prepared_execution(
     device = require_b12x()
     ids = (7, 0, 5) if mapped else tuple(range(8))
     w13 = blocks(
-        e=len(ids), n=intermediate_size * (2 if activation == "silu" else 1),
+        e=len(ids), n=intermediate_size * (2 if activation in ("silu", "situ") else 1),
         k=hidden_size, codec=codec,
     )
     w2 = blocks(e=len(ids), n=hidden_size, k=intermediate_size, codec=codec)
