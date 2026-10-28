@@ -43,6 +43,16 @@ def plan(
     return _plan(caps, invocation=invocation, override=override)
 
 
+def state(plan: Plan, *, device=None):
+    """Return the prepared runtime state for a declared plan.
+
+    Integrators that allocate scratch from plan geometry (caps, split
+    counts, scratch specs) need the materialized state; an unprepared
+    plan is lazy-prepared with its default configuration.
+    """
+    return _state(plan, device=device)
+
+
 def bind(
     plan: Plan,
     **kwargs,
@@ -96,4 +106,5 @@ __all__ = [
     "Binding", "Budget", "DenseMlaConfig", "DenseMlaQuery", "Caps", "Plan",
     "Scratch", "bind", "clear_caches", "infer_mode", "invocation_from_descriptors",
     "invocation_from_tensors", "is_supported", "plan", "reference", "run",
+    "state",
 ]

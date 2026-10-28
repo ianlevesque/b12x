@@ -41,6 +41,7 @@ META = OpMeta(
         "Binding",
         "Scratch",
         "plan",
+        "state",
         "invocation_from_descriptors",
         "invocation_from_tensors",
         "bind",
@@ -88,6 +89,7 @@ if TYPE_CHECKING:
         plan,
         reference,
         run,
+        state,
     )
 
 install_lazy_api(globals(), META)
