@@ -53,6 +53,26 @@ def state(plan: Plan, *, device=None):
     return _state(plan, device=device)
 
 
+def compile(*, binding: Binding) -> None:
+    """Compile exact native entries for one binding without launching.
+
+    Compatibility entry for integrators that pre-compile each tensor
+    layout before CUDA graph capture: primes the plan's state for this
+    binding's exact signature when it differs from the primed one.
+    """
+    if not isinstance(binding, Binding):
+        raise TypeError("binding must be dense_mla.Binding")
+    from ._kernel import _signature
+
+    state = _state(binding.plan, device=binding.runtime.q.device)
+    launchers = state.launchers
+    if (
+        launchers is None
+        or launchers["dense"].signature != _signature(binding.runtime)
+    ):
+        state.prime(binding.runtime)
+
+
 def bind(
     plan: Plan,
     **kwargs,
@@ -104,7 +124,7 @@ def clear_caches() -> None:
 
 __all__ = [
     "Binding", "Budget", "DenseMlaConfig", "DenseMlaQuery", "Caps", "Plan",
-    "Scratch", "bind", "clear_caches", "infer_mode", "invocation_from_descriptors",
+    "Scratch", "bind", "clear_caches", "compile", "infer_mode", "invocation_from_descriptors",
     "invocation_from_tensors", "is_supported", "plan", "reference", "run",
     "state",
 ]
