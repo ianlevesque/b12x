@@ -598,6 +598,10 @@ def moe_reference_iq2_xs(
         row, slot = (topk_ids == expert).nonzero(as_tuple=True)
         first = dequantize_blocks(w13[local]).bfloat16().to(x.device).float()
         second = dequantize_blocks(w2[local]).bfloat16().to(x.device).float()
+        # Ragged block-codec K: storage rounds up to whole blocks; the
+        # logical intermediate comes from the w13 projection width.
+        logical = first.shape[-2] // (2 if activation in ("silu", "situ") else 1)
+        second = second[..., :logical]
         projected = (x[row].float() @ first.T).bfloat16().float()
         if activation in ("silu", "situ"):
             left, right = projected.chunk(2, -1)
