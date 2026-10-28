@@ -134,7 +134,21 @@ def prepare_experts(layer: IQ2XSLayer, device, *, activation="silu"):
         t.numel() * t.element_size()
         for t in (prepared.w13, prepared.w13_scale, prepared.w2, prepared.w2_scale)
     )
-    assert payload == source.w13.numel() + source.w2.numel()
+    # Ragged FC2 K (intermediate % 256 == 128): preparation drops the
+    # don't-care descriptor words and subscale groups past the logical K.
+    from b12x._lib.quant.block_codec import block_codec
+
+    inter = layer.intermediate_size
+    spec = block_codec(layer.weights.codec)
+    kb = -(-inter // spec.block_weights)
+    dropped_k16 = (kb * spec.block_weights - inter) // 16
+    dropped = (
+        len(layer.expert_ids) * layer.hidden_size * dropped_k16
+        * (4 // spec.pack_factor) * 4
+    )
+    if layer.weights.codec == "iq2_xs":
+        dropped += len(layer.expert_ids) * (layer.hidden_size // 64) * (kb * 2 - inter // 128) * 256
+    assert payload == source.w13.numel() + source.w2.numel() - dropped
     return experts, payload
 
 

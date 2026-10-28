@@ -1353,9 +1353,9 @@ class W4A16GemmKernel:
                 raise ValueError("IQ2_XS W4A16 requires BF16 activations")
             if scale_format != weight_layout:
                 raise ValueError("IQ2_XS W4A16 weights require scale_format='iq2_xs'")
-            if size_k % max(128, block_codec(weight_layout).block_weights) != 0 or size_n % 16 != 0:
+            if size_k % 128 != 0 or size_n % 16 != 0:
                 raise ValueError(
-                    "IQ2_XS W4A16 requires K % 256 == 0 and N % 16 == 0; "
+                    "IQ2_XS W4A16 requires K % 128 == 0 and N % 16 == 0; "
                     f"got N={size_n} K={size_k}"
                 )
         trellis_pair_kind = (
@@ -5338,7 +5338,7 @@ class W4A16GemmKernel:
                 )
             metadata_addr = get_ptr_as_int64(scales_i32_flat, Int64(0))
             expert_count = Int64(cute.size(b_i32_flat)) // Int64(self.size_k * self.size_n // (4 * self.block_pack_factor))
-            base_plane_bytes = expert_count * Int64(self.size_k // self.block_k * self.size_n * 2)
+            base_plane_bytes = expert_count * Int64(_covering_count(self.size_k, self.block_k) * self.size_n * 2)
             base_chunks = _covering_count(self.cta_k_blocks * 16, self.block_k) * self.cta_n_blocks * 2
             base_region = b_region + Int32(self.cta_k_blocks * self.cta_n_blocks * self.block_tile_bytes)
             scale_region = base_region + Int32(base_chunks * 16)
@@ -5347,7 +5347,7 @@ class W4A16GemmKernel:
                 if chunk < Int32(base_chunks):
                     if cutlass.const_expr(not self.q8 and self.tile_n == 64 and self.tile_k == 128):
                         base_tile = (
-                            (Int64(expert_idx) * Int64(self.size_k // self.block_k)
+                            (Int64(expert_idx) * Int64(_covering_count(self.size_k, self.block_k))
                              + Int64(tile_idx // Int32(2)))
                             * Int64(self.size_n // 64) + Int64(output_n_tile)
                         )
@@ -5357,7 +5357,7 @@ class W4A16GemmKernel:
                         global_k256 = tile_idx * Int32(self.cta_k_blocks) // Int32(self.block_k // 16) + local_tile // Int32(self.cta_n_blocks)
                         global_n16 = output_n_tile * Int32(self.cta_n_blocks) + local_tile % Int32(self.cta_n_blocks)
                         block = (
-                            (Int64(expert_idx) * Int64(self.size_k // self.block_k) + Int64(global_k256))
+                            (Int64(expert_idx) * Int64(_covering_count(self.size_k, self.block_k)) + Int64(global_k256))
                             * Int64(n16_total) + Int64(global_n16)
                         )
                         base_offset = block * Int64(32) + Int64(chunk % Int32(2)) * Int64(16)
@@ -7793,11 +7793,11 @@ class W4A16FusedMoeKernel:
             layout=cute.make_layout((Int64(w2_elements),), stride=(1,)),
         )
         w13_metadata_elements = expert_count * Int64(
-            self.fc1.size_k // self.fc1.block_k * self.fc1.size_n
+            _covering_count(self.fc1.size_k, self.fc1.block_k) * self.fc1.size_n
             * self.fc1.block_metadata_bytes // 4
         )
         w2_metadata_elements = expert_count * Int64(
-            self.fc2.size_k // self.fc2.block_k * self.fc2.size_n
+            _covering_count(self.fc2.size_k, self.fc2.block_k) * self.fc2.size_n
             * self.fc2.block_metadata_bytes // 4
         )
         if cutlass.const_expr(not self.fc1.weight_layout_block):

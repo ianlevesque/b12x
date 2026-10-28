@@ -13,7 +13,7 @@ from .test_iq2_xs import blocks
 
 
 @pytest.mark.parametrize(
-    "hidden_size,intermediate_size", [(256, 256), (2048, 512)]
+    "hidden_size,intermediate_size", [(256, 256), (2048, 512), (2048, 384)]
 )
 @pytest.mark.parametrize(
     "activation,mapped,route,capacity,counts",

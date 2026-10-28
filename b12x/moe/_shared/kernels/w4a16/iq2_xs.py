@@ -16,6 +16,7 @@ def pack_iq2_xs_matrix(
     swap_halves: bool = False,
     tile_descriptors: bool = False,
     tile_scales: bool = False,
+    logical_k: int | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Pack raw IQ2 blocks into encoded payload and compact metadata planes.
 
@@ -36,7 +37,13 @@ def pack_iq2_xs_matrix(
     if blocks.ndim != 4 or blocks.shape[-1] != spec.block_bytes:
         raise ValueError(f"{codec.upper()} blocks must have shape [E,N,K/{spec.block_weights},{spec.block_bytes}]")
     e, n, kb, _ = blocks.shape
-    k16 = kb * spec.block_weights // 16
+    k16_total = kb * spec.block_weights // 16
+    if logical_k is None:
+        k16 = k16_total
+    else:
+        if logical_k % 128 or not 0 < logical_k <= kb * spec.block_weights:
+            raise ValueError("logical_k must be a positive multiple of 128 within the stored blocks")
+        k16 = logical_k // 16
     words_per_row = 4 // spec.pack_factor
     if min(e, n, kb) <= 0 or n % 16:
         raise ValueError("IQ2_XS requires positive geometry and N divisible by 16")
@@ -50,12 +57,20 @@ def pack_iq2_xs_matrix(
         dtype=torch.int32,
         device=blocks.device,
     )
-    metadata = torch.empty(e * kb * n * spec.metadata_bytes, dtype=torch.uint8, device=blocks.device)
+    k128_groups = k16 // 8
+    if spec.subscale_bytes and not tile_scales and k16 != k16_total:
+        raise ValueError("ragged-K IQ2 packing requires tiled scales")
+    scales_bytes = (
+        e * (n // 64) * k128_groups * 4 * 4 * 8 * 2
+        if spec.subscale_bytes and tile_scales
+        else e * kb * n * spec.subscale_bytes
+    )
+    metadata = torch.empty(e * kb * n * 2 + scales_bytes, dtype=torch.uint8, device=blocks.device)
     base_bytes = e * kb * n * 2
     bases = metadata[:base_bytes].view(torch.float16).reshape(e, kb, n // 16, 8, 2)
     if spec.subscale_bytes:
         scales = metadata[base_bytes:].reshape(
-            (e, n // 64, kb, 2, 4, 4, 8, 2)
+            (e, n // 64, k128_groups, 4, 4, 8, 2)
             if tile_scales else (e, kb, n // 16, 8, 8, 2)
         )
     for expert in range(e):
@@ -74,6 +89,7 @@ def pack_iq2_xs_matrix(
                 if not bool(torch.isfinite(d).all()):
                     raise ValueError("IQ2_XS block bases must be finite")
                 q = chunk[..., 2:2 + spec.payload_bytes].contiguous().view(torch.int32)
+                q = q.reshape(stop - row, k16_total * words_per_row)[:, :k16 * words_per_row]
                 descriptors = (q.reshape(stop - row, k16, words_per_row)
                                .permute(1, 0, 2).contiguous()
                                .reshape(k16, (stop - row) // 16, 2, 8, words_per_row)
@@ -95,6 +111,8 @@ def pack_iq2_xs_matrix(
                         chunk[..., 66:]
                         .reshape((stop - row) // 64, 4, 2, 8, kb, 2, 4)
                         .permute(0, 4, 5, 6, 1, 3, 2)
+                        .reshape((stop - row) // 64, kb * 2, 4, 4, 8, 2)
+                        [:, :k128_groups]
                     )
                 else:
                     scales[expert, :, row // 16 : stop // 16].copy_(
@@ -125,9 +143,9 @@ def prepare_iq2_xs_moe_weights(
     if (
         min(hidden_size, intermediate_size, num_experts) <= 0
         or hidden_size % max(128, spec.block_weights)
-        or intermediate_size % max(128, spec.block_weights)
+        or intermediate_size % 128
     ):
-        raise ValueError("IQ2_XS requires positive geometry and H/I divisible by 256")
+        raise ValueError("IQ2_XS requires positive geometry, H divisible by 256 and I divisible by 128")
     if not w13.is_cuda or w2.device != w13.device:
         raise ValueError("IQ2_XS preparation requires tensors on one CUDA device")
     gated = activation in {"silu", "situ"}
@@ -137,14 +155,14 @@ def prepare_iq2_xs_moe_weights(
         hidden_size // spec.block_weights,
         spec.block_bytes,
     )
-    expected2 = (num_experts, hidden_size, intermediate_size // spec.block_weights, spec.block_bytes)
+    expected2 = (num_experts, hidden_size, -(-intermediate_size // spec.block_weights), spec.block_bytes)
     if tuple(w13.shape) != expected13 or tuple(w2.shape) != expected2:
         raise ValueError(f"IQ2_XS blocks must have shapes {expected13} and {expected2}")
     q13, s13 = pack_iq2_xs_matrix(
         w13, codec=codec, swap_halves=gated and w13_layout == "w13",
         tile_descriptors=True, tile_scales=True,
     )
-    q2, s2 = pack_iq2_xs_matrix(w2, codec=codec, tile_descriptors=True, tile_scales=True)
+    q2, s2 = pack_iq2_xs_matrix(w2, codec=codec, tile_descriptors=True, tile_scales=True, logical_k=intermediate_size)
     if codec in IQ2_CODECS:
         iq2_xs_execution_lut(w13.device, prepare=True, selectors=True, codec=codec)
     unit = torch.ones(num_experts, dtype=torch.float32, device=w13.device)

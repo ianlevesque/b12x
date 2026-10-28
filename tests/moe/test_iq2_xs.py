@@ -17,8 +17,8 @@ from b12x.testing.iq2_xs_reference import dequantize_blocks, descriptor_vectors
 def blocks(e=2, n=544, k=768, codec="iq2_xs"):
     block_size = 32 if codec == "q8_0" else 256
     g = torch.Generator().manual_seed(712)
-    raw = torch.randint(0, 256, (e, n, k // block_size, 34 if codec == "q8_0" else 66 if codec == "iq2_xxs" else 74), dtype=torch.uint8, generator=g)
-    bases = (torch.randn(e, n, k // block_size, generator=g) * 0.01).half()
+    raw = torch.randint(0, 256, (e, n, -(-k // block_size), 34 if codec == "q8_0" else 66 if codec == "iq2_xxs" else 74), dtype=torch.uint8, generator=g)
+    bases = (torch.randn(e, n, -(-k // block_size), generator=g) * 0.01).half()
     raw[..., :2] = bases[..., None].view(torch.uint8)
     return raw
 
@@ -194,7 +194,7 @@ def weight_plan(
 
 
 @pytest.mark.parametrize("activation", ["silu", "relu2", "situ"])
-@pytest.mark.parametrize("i", [256, 512])
+@pytest.mark.parametrize("i", [256, 384, 512])
 @pytest.mark.parametrize("codec", ["iq2_xs", "iq2_xxs"])
 def test_public_weight_plan(activation, i, codec):
     plan = weight_plan(activation=activation, i=i, codec=codec)
@@ -213,7 +213,7 @@ def test_public_weight_plan(activation, i, codec):
         {"dtype": torch.float16},
         {"activation": "swigluoai"},
         {"h": 384},
-        {"i": 128},
+        {"i": 192},
         {"packing": "mma_packed"},
     ],
 )
