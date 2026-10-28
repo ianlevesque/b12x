@@ -24,6 +24,8 @@ from .test_iq2_xs import blocks
         ("silu", True, "packed", 16, (1, 3, 8, 16)),
         ("situ", True, "packed", 16, (1, 3, 8, 16)),
         ("situ", True, "packed", 65, (9, 17, 33, 65)),
+        ("situ", False, "direct", 8, (1, 3, 8)),
+        ("situ", True, "direct", 8, (1, 3, 8)),
         ("silu", True, "direct", 8, (8,)),
         ("relu2", False, "packed", 16, (1, 3, 8, 16)),
         ("relu2", True, "packed", 16, (1, 3, 8, 16)),

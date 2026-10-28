@@ -454,7 +454,7 @@ def _w4a16_primary_launches(scratch, caps) -> _W4A16PrimaryLaunches:
         direct = direct_mapped = None
         if weight_layout in BLOCK_CODECS:
             if (caps.decode_config.w4a16_route_mode != "packed"
-                    and tokens <= 8 and core.activation in {"silu", "relu2"} and not caps.deterministic_output
+                    and tokens <= 8 and core.activation in {"silu", "relu2", "situ"} and not caps.deterministic_output
                     and not caps.collect_activation_amax and not caps.apply_router_weight_on_input):
                 decode_args = {**compiler_args, "moe_block_size": 8}
                 direct = compile_w4a16_fused_moe(

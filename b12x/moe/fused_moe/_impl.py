@@ -2680,7 +2680,7 @@ def _w4a16_direct_routing_supported(query: MoeDecodeQuery) -> bool:
         )
 
         capacity_supported = (
-            query.activation in {"silu", "relu2"} and query.num_tokens <= _TC_DECODE_MAX_M
+            query.activation in {"silu", "relu2", SITU} and query.num_tokens <= _TC_DECODE_MAX_M
         )
         return bool(
             capacity_supported and query.io_dtype == "bfloat16"
