@@ -340,13 +340,20 @@ def plan_weights(
         bits = source.uniform_bits or 3
         # Match the native K2 intermediate-Hadamard and projection-tiered
         # geometries; container identity does not select an execution policy.
-        tile_config = (
-            (128, 128, 128, 128)
-            if expert.kind == "intermediate_hadamard" and bits == 2
-            else (128, 256, 64, 256)
-            if config.codebook.value == "mcg" and source.uniform_bits is None
-            else (64, 256, 64, 256)
-        )
+        if expert.kind == "intermediate_hadamard" and bits == 2:
+            tile_config = (128, 128, 128, 128)
+        elif config.codebook.value == "mcg" and source.uniform_bits is None:
+            tile_config = (128, 256, 64, 256)
+        else:
+            # trellis_t256_proj has no FC1/FC2 logical-tail path: each CTA
+            # N tile must divide its projection. TP partitions such as
+            # I=384 (3072/8) are 128- but not 256-divisible; fall back to
+            # the 128 tile the intermediate-Hadamard path already uses.
+            fc1_tile_n = (
+                256 if geometry.intermediate_size % 256 == 0 else 128
+            )
+            fc2_tile_n = 256 if geometry.hidden_size % 256 == 0 else 128
+            tile_config = (64, fc1_tile_n, 64, fc2_tile_n)
         raw_plan = plan_b12x_fp4_moe_weights(
             quant_modes=recipe,
             source_format="b12x_trellis",

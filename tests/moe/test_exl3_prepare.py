@@ -506,3 +506,44 @@ def test_canonical_exl3_preparation_preserves_source_extent(
                 torch.testing.assert_close(captured, reference, rtol=2e-3, atol=2e-3)
         finally:
             graph.reset()
+
+
+@requires_cuda
+def test_canonical_ordinary_k2_ragged_partition_prepares(tmp_path) -> None:
+    """Ordinary-boundary K2 at I=384 (3072/TP8) selects the 128 FC1 tile.
+
+    trellis_t256_proj has no logical-tail path, so the planner must not
+    demand the 256 tile for partitions that are only 128-divisible.
+    """
+    from b12x.moe import fused_moe
+    from b12x.moe.checkpoints.exl3 import trellis_from_exl3
+
+    config = Exl3SynthConfig(
+        codebook="lut_e4m3",
+        num_experts=2,
+        hidden_size=512,
+        intermediate_size=384,
+        moe_layer_indices=(1,),
+        bits=2,
+        per_expert_input_rotations=True,
+        extent_alignment_slots=2,
+        seed=61,
+    )
+    manifest = write_exl3_checkpoint(tmp_path, config)
+    layer = read_exl3_layer(tmp_path, manifest, 1, first_slot=0, slot_count=12)
+    source, weights = trellis_from_exl3(layer)
+    plan = fused_moe.plan_weights(
+        source=source,
+        activation=fused_moe.ActivationSpec(
+            mode="a16", nonlinearity="situ", io_dtype=torch.bfloat16,
+        ),
+        geometry=fused_moe.MoEGeometry(
+            num_experts=2, hidden_size=512, intermediate_size=384
+        ),
+    )
+    assert plan._impl.trellis_tile_config == (64, 128, 64, 256)
+    prepared = fused_moe.prepare_weights(
+        plan=plan, weights=weights, device=_device(),
+    )
+    assert prepared.intermediate_size == 384
+    assert prepared.hidden_size == 512
