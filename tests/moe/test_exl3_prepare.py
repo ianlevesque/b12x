@@ -538,6 +538,7 @@ def test_canonical_ordinary_k2_ragged_partition_prepares(tmp_path) -> None:
         source=source,
         activation=fused_moe.ActivationSpec(
             mode="a16", nonlinearity="situ", io_dtype=torch.bfloat16,
+            rotation_dtype=torch.float16,
         ),
         geometry=fused_moe.MoEGeometry(
             num_experts=2, hidden_size=512, intermediate_size=384
