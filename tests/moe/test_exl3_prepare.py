@@ -522,7 +522,9 @@ def test_canonical_ordinary_k2_ragged_partition_prepares(tmp_path) -> None:
         codebook="lut_e4m3",
         num_experts=2,
         hidden_size=512,
-        intermediate_size=384,
+        # Full checkpoint stays pair-complete (32 slots); the TP partition
+        # below reads 12 slots -> local intermediate 384.
+        intermediate_size=1024,
         moe_layer_indices=(1,),
         bits=2,
         per_expert_input_rotations=True,
@@ -541,9 +543,53 @@ def test_canonical_ordinary_k2_ragged_partition_prepares(tmp_path) -> None:
             num_experts=2, hidden_size=512, intermediate_size=384
         ),
     )
-    assert plan._impl.trellis_tile_config == (64, 128, 64, 256)
+    # FC1/FC2 share one CTA: the halved FC1 N tile takes a doubled K
+    # tile so both phases keep 256 threads (compile rejects a mismatch).
+    assert plan._impl.trellis_tile_config == (128, 128, 64, 256)
     prepared = fused_moe.prepare_weights(
         plan=plan, weights=weights, device=_device(),
     )
     assert prepared.intermediate_size == 384
     assert prepared.hidden_size == 512
+
+    # A forward run must compile: prepare alone accepted the mismatched
+    # (64, 128, 64, 256) geometry that compile_w4a16_fused_moe rejects.
+    from b12x.preparation import PreparationSession, PreparedCall
+
+    capacity, topk = 8, 2
+    torch.manual_seed(61)
+    source = (torch.randn(capacity, 512, device=_device()) * 0.01).bfloat16()
+    route_ids = torch.tensor([0, 1], device=_device(), dtype=torch.int32)
+    route_ids = route_ids.repeat(capacity, 1)
+    route_weights = torch.softmax(
+        torch.randn(capacity, topk, device=_device()), -1)
+    output = torch.empty_like(source)
+    execution = fused_moe.plan_execution(
+        experts=prepared,
+        capacity=fused_moe.ExecutionCapacity(max_tokens=capacity, top_k=topk),
+        routing=fused_moe.RoutingSpec(),
+    )
+
+    def allocate(state):
+        return tuple(torch.empty(s.shape, dtype=s.dtype, device=s.device)
+                     for s in state.scratch.scratch_specs())
+
+    def bind(state, scratch):
+        return state.bind(
+            scratch=scratch, a=source, experts=prepared,
+            topk_weights=route_weights, topk_ids=route_ids,
+            output=output,
+        )
+
+    def primer(state):
+        scratch = allocate(state)
+        return PreparedCall(
+            run=lambda: state.run(bind(state, scratch)), owners=scratch)
+
+    with PreparationSession(device=source.device, autotune=False) as session:
+        request = execution.request(
+            name="exl3-ragged-fc1-tile", prepare_call=primer)
+        session.prepare((request,))
+        state = require_prepared(request.plan, "moe.decode")
+        result = state.run(bind(state, allocate(state)))
+    assert torch.isfinite(result).all() and torch.count_nonzero(result)
