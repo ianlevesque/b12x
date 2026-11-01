@@ -353,7 +353,15 @@ def plan_weights(
                 256 if geometry.intermediate_size % 256 == 0 else 128
             )
             fc2_tile_n = 256 if geometry.hidden_size % 256 == 0 else 128
-            tile_config = (64, fc1_tile_n, 64, fc2_tile_n)
+            # FC1/FC2 share one CTA, so tile_k * tile_n (the thread count)
+            # must match across phases: a halved N tile takes a doubled
+            # K tile, keeping the default geometry's 256 threads.
+            tile_config = (
+                16384 // fc1_tile_n,
+                fc1_tile_n,
+                16384 // fc2_tile_n,
+                fc2_tile_n,
+            )
         raw_plan = plan_b12x_fp4_moe_weights(
             quant_modes=recipe,
             source_format="b12x_trellis",
