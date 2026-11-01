@@ -555,6 +555,7 @@ def test_canonical_ordinary_k2_ragged_partition_prepares(tmp_path) -> None:
     # A forward run must compile: prepare alone accepted the mismatched
     # (64, 128, 64, 256) geometry that compile_w4a16_fused_moe rejects.
     from b12x.preparation import PreparationSession, PreparedCall
+    from b12x.preparation.types import require_prepared
 
     capacity, topk = 8, 2
     torch.manual_seed(61)
