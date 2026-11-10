@@ -142,8 +142,25 @@ def load() -> ctypes.CDLL:
         lib.roce_destroy.argtypes = [p]
         if lib.roce_abi_version() != 4:
             raise RuntimeError("unexpected b12x RoCE proxy ABI version")
+        lib.roce_features.restype = ctypes.c_uint32
+        lib.roce_features.argtypes = []
         _LIB = lib
         return lib
+
+
+FEATURE_WINDOWS = 1
+# Doorbell encoding of a windowed op (see ``_roce_proxy.c``): bit 31, bit 30 for
+# a single-rail op, the per-peer window in 16-byte packs in bits 16..29, the
+# common part in 16-byte packs in bits 0..15.
+WINDOWED_FLAG = 0x80000000
+SINGLE_RAIL_FLAG = 0x40000000
+MAX_WINDOW_PACKS = 0x3FFF
+MAX_WINDOWED_COMMON_PACKS = 0xFFFF
+
+
+def features() -> int:
+    """Capability bits of the built proxy beyond the ABI-4 baseline."""
+    return int(load().roce_features())
 
 
 class Layout:
@@ -282,4 +299,14 @@ class Proxy:
             self.close()
 
 
-__all__ = ["Layout", "Proxy", "load"]
+__all__ = [
+    "FEATURE_WINDOWS",
+    "Layout",
+    "MAX_WINDOWED_COMMON_PACKS",
+    "MAX_WINDOW_PACKS",
+    "Proxy",
+    "SINGLE_RAIL_FLAG",
+    "WINDOWED_FLAG",
+    "features",
+    "load",
+]

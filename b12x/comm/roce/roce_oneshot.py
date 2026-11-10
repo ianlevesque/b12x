@@ -32,7 +32,15 @@ from torch.distributed import ProcessGroup
 
 from . import _allgather_cute
 from ._oneshot_cute import PACK_BYTES, get_launcher, is_launcher_prepared
-from ._proxy import Layout, Proxy, load as _load_proxy_library
+from ._proxy import (
+    FEATURE_WINDOWS,
+    MAX_WINDOW_PACKS,
+    MAX_WINDOWED_COMMON_PACKS,
+    Layout,
+    Proxy,
+    features as _proxy_features,
+    load as _load_proxy_library,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -306,6 +314,7 @@ class RoceOneshotAllReduce:
             "proxy_abi": _load_proxy_library().roce_abi_version()
             if error is None
             else None,
+            "proxy_features": _proxy_features() if error is None else None,
             "world_size": self.world_size,
             "hca_count": len(self.hca_names),
             "traffic_class": self._proxy.traffic_class if error is None else None,
@@ -401,6 +410,77 @@ class RoceOneshotAllReduce:
         """Build a runtime from a process group used for both rank identity and the setup exchange."""
         capacity = max(int(max_size), int(max_input_bytes or 0))
         return cls(exchange_group=process_group, device=device, max_size=capacity)
+
+    # -- integrator kernels -------------------------------------------------------
+
+    @property
+    def supports_windows(self) -> bool:
+        """True when the proxy posts windowed ops (a per-peer part after the common part)."""
+        return bool(_proxy_features() & FEATURE_WINDOWS)
+
+    def windowed_capacity(self, common_bytes: int, window_bytes: int) -> bool:
+        """Whether one windowed op of this geometry fits the slot and the doorbell word."""
+        common_bytes, window_bytes = int(common_bytes), int(window_bytes)
+        return (
+            common_bytes % PACK_BYTES == 0
+            and window_bytes % PACK_BYTES == 0
+            and 0 <= window_bytes // PACK_BYTES <= MAX_WINDOW_PACKS
+            and 0 <= common_bytes // PACK_BYTES <= MAX_WINDOWED_COMMON_PACKS
+            and common_bytes + window_bytes > 0
+            and common_bytes + self.world_size * window_bytes <= self._slot_bytes
+        )
+
+    def fused_handles(self) -> dict[str, int]:
+        """Addresses and geometry an integrator's own collective kernel needs.
+
+        Such a kernel follows the protocol of ``_oneshot_cute``: it reads the
+        device epoch, stages into ``send[seq & 1]``, publishes the per-slot
+        doorbell word and then ``seq``, waits for ``flag[peer][seq & 1][hca] ==
+        seq`` of every peer and HCA, consumes ``recv[peer][seq & 1]``, and
+        advances the epoch last.  It may run several consecutive sequences in
+        one launch.  Launch it inside :meth:`fused_launch`.
+        """
+        if self._closed or self._proxy is None:
+            raise RuntimeError("RoCE runtime is closed")
+        return {
+            "world_size": self.world_size,
+            "rank": self.rank,
+            "hca_count": len(self.hca_names),
+            "slots": self._layout.slots,
+            "flag_stride": self._layout.flag_stride,
+            "slot_bytes": self._slot_bytes,
+            "recv_base": self._recv_base,
+            "flag_base": self._flag_base,
+            "send_base": self._send_base,
+            "ctrl_base": self._ctrl_base,
+            "epoch_address": self._epoch_address,
+            "poison_address": self._poison_address,
+            "spin_limit": self.spin_limit,
+            "features": _proxy_features(),
+        }
+
+    @contextmanager
+    def fused_launch(self, stream: object = None):
+        """Admit one integrator kernel launch; yields whether a capture is active.
+
+        Holds the lifecycle lock from admission through enqueue, refuses a
+        poisoned or closed runtime, and orders the launch against this
+        runtime's other collectives exactly as ``all_reduce`` does.
+        """
+        with self._lock:
+            self.check_health()
+            if self._closed or self._proxy is None:
+                raise RuntimeError("RoCE runtime is closed")
+            context = (
+                torch.cuda.stream(stream) if stream is not None else _nullcontext()
+            )
+            with torch.cuda.device(self.device), context:
+                capturing = torch.cuda.is_current_stream_capturing()
+                self._order_stream(capturing)
+                yield capturing
+                self._mark_stream(capturing)
+        if not capturing:
+            self.check_health()
 
     # -- policy -----------------------------------------------------------------
 

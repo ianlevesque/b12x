@@ -11,6 +11,15 @@
 //                                                  last two are set by the kernel
 //                                                  when a wait times out
 //
+// A doorbell word with ROCE_WINDOWED set describes a windowed op instead of a
+// byte count: every peer p receives the first `common` bytes of the send slot
+// followed by its own window, send[common + p * window, +window), so one op
+// carries an all-reduce payload and a reduce-scatter payload (peer p only gets
+// the columns it owns).  The receive slot of a windowed op is
+// [common bytes][window bytes].  With ROCE_SINGLE_RAIL the whole op, and its
+// one flag per peer, rides the first HCA: a small payload gains nothing from
+// striping and saves half of the work requests of the round.
+//
 // The GPU kernel stages its input into send[seq & 1], publishes nbytes and seq
 // in ctrl, then spins on flag[peer][seq & 1][hca] for every peer and HCA.  The
 // proxy thread
@@ -42,6 +51,14 @@
 #define ROCE_PORT 1
 #define ROCE_SEND_DEPTH 256
 #define ROCE_ABI_VERSION 4
+// Capabilities beyond the ABI-4 baseline, reported by roce_features().
+#define ROCE_FEATURE_WINDOWS 1u
+// Doorbell word of a windowed op: bit 31; bit 30 selects one rail; the window
+// size in 16-byte packs is in bits 16..29 and the common size in 16-byte packs
+// in bits 0..15.  A plain byte count never sets bit 31: it is bounded by
+// slot_bytes, which the runtime keeps far below 2 GiB.
+#define ROCE_WINDOWED 0x80000000u
+#define ROCE_SINGLE_RAIL 0x40000000u
 // Model graphs leave sub-millisecond gaps between collectives.  Keep the
 // proxy hot across those gaps; sleeping there adds one scheduler wakeup to
 // every collective on the graph's critical path.
@@ -103,6 +120,8 @@ static void set_err(roce_ctx_t *c, const char *what, int e) {
 }
 
 int roce_abi_version(void) { return ROCE_ABI_VERSION; }
+
+uint32_t roce_features(void) { return ROCE_FEATURE_WINDOWS; }
 
 int roce_layout(int world, uint64_t slot_bytes, uint64_t *out) {
     // out = {recv_off, flag_off, send_off, ctrl_off, total_bytes, flag_stride, slots}
@@ -375,8 +394,27 @@ static int drain_cq(roce_ctx_t *c, int h) {
     return 0;
 }
 
-static int post_op(roce_ctx_t *c, uint32_t seq, uint32_t nbytes) {
-    if (nbytes == 0 || nbytes % 16 != 0) {
+static int post_op(roce_ctx_t *c, uint32_t seq, uint32_t word) {
+    // `nbytes` is the part every peer receives; `window_bytes` is the extra
+    // per-peer part of a windowed op (0 for a plain op).
+    uint32_t nbytes = word;
+    uint32_t window_bytes = 0;
+    int rails = c->n_hca;
+    if (word & ROCE_WINDOWED) {
+        nbytes = (word & 0xFFFFu) * 16u;
+        window_bytes = ((word >> 16) & 0x3FFFu) * 16u;
+        if (word & ROCE_SINGLE_RAIL) {
+            rails = 1;
+        }
+        if (nbytes + window_bytes == 0 ||
+            (uint64_t)nbytes + (uint64_t)c->world * window_bytes > c->slot_bytes) {
+            snprintf(c->err, sizeof(c->err),
+                     "invalid RoCE windowed op: common %u bytes, window %u bytes, "
+                     "%d ranks, slot %zu bytes",
+                     nbytes, window_bytes, c->world, c->slot_bytes);
+            return -1;
+        }
+    } else if (nbytes == 0 || nbytes % 16 != 0) {
         snprintf(c->err, sizeof(c->err),
                  "RoCE payload size must be a positive multiple of 16 bytes, got %u",
                  nbytes);
@@ -391,10 +429,11 @@ static int post_op(roce_ctx_t *c, uint32_t seq, uint32_t nbytes) {
             continue;
         }
         uint32_t pack_offset = 0;
-        for (int h = 0; h < c->n_hca; h++) {
+        for (int h = 0; h < rails; h++) {
             roce_hca_t *hca = &c->hca[h];
-            // Two work requests per stripe; keep the queue at most a quarter
-            // full so a provider that needs extra entries can never fail a post.
+            // At most three work requests per stripe, one of them signaled;
+            // keep the signaled count at most a quarter of the queue so a
+            // provider that needs extra entries can never fail a post.
             while (hca->outstanding[p] >= ROCE_SEND_DEPTH / 4) {
                 if (drain_cq(c, h) != 0) {
                     return -1;
@@ -409,8 +448,8 @@ static int post_op(roce_ctx_t *c, uint32_t seq, uint32_t nbytes) {
                     return -1;
                 }
             }
-            uint32_t stripe_packs = total_packs / (uint32_t)c->n_hca;
-            if ((uint32_t)h < total_packs % (uint32_t)c->n_hca) {
+            uint32_t stripe_packs = total_packs / (uint32_t)rails;
+            if ((uint32_t)h < total_packs % (uint32_t)rails) {
                 stripe_packs += 1;
             }
             uint32_t stripe_bytes = stripe_packs * 16;
@@ -434,9 +473,35 @@ static int post_op(roce_ctx_t *c, uint32_t seq, uint32_t nbytes) {
                  (uint64_t)h) * ROCE_FLAG_STRIDE;
             flag_wr.wr.rdma.rkey = c->peer_rkey[h][p];
 
+            // The peer's window rides the first HCA, between that stripe of
+            // the common part and its flag, at offset `nbytes` of the
+            // receive slot.
+            struct ibv_send_wr window_wr;
+            struct ibv_sge window_sge;
+            struct ibv_send_wr *after_data = &flag_wr;
+            if (window_bytes != 0 && h == 0) {
+                window_sge = (struct ibv_sge){
+                    .addr = (uint64_t)(uintptr_t)(send + nbytes + (uint64_t)p * window_bytes),
+                    .length = window_bytes,
+                    .lkey = hca->mr->lkey,
+                };
+                memset(&window_wr, 0, sizeof(window_wr));
+                window_wr.wr_id = (uint64_t)p;
+                window_wr.next = &flag_wr;
+                window_wr.sg_list = &window_sge;
+                window_wr.num_sge = 1;
+                window_wr.opcode = IBV_WR_RDMA_WRITE;
+                window_wr.wr.rdma.remote_addr =
+                    remote + c->recv_off +
+                    ((uint64_t)c->rank * ROCE_SLOTS + slot) * c->slot_bytes + nbytes;
+                window_wr.wr.rdma.rkey = c->peer_rkey[h][p];
+                after_data = &window_wr;
+                hca->bytes_posted += window_bytes;
+            }
+
             struct ibv_send_wr data_wr;
             struct ibv_sge data_sge;
-            struct ibv_send_wr *first_wr = &flag_wr;
+            struct ibv_send_wr *first_wr = after_data;
             if (stripe_bytes != 0) {
                 data_sge = (struct ibv_sge){
                     .addr = (uint64_t)(uintptr_t)(send + byte_offset),
@@ -445,7 +510,7 @@ static int post_op(roce_ctx_t *c, uint32_t seq, uint32_t nbytes) {
                 };
                 memset(&data_wr, 0, sizeof(data_wr));
                 data_wr.wr_id = (uint64_t)p;
-                data_wr.next = &flag_wr;
+                data_wr.next = after_data;
                 data_wr.sg_list = &data_sge;
                 data_wr.num_sge = 1;
                 data_wr.opcode = IBV_WR_RDMA_WRITE;
